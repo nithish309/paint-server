@@ -4,6 +4,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import multer from "multer";
 import path from "path";
+import fs from "fs"; // Import fs module for file operations
 import { fileURLToPath } from 'url';
 
 dotenv.config();
@@ -16,11 +17,16 @@ app.use(express.json());
 app.use(cors());
 app.use(express.urlencoded({ extended: true }));
 
+// Ensure the uploads directory exists
+if (!fs.existsSync(path.join(__dirname, 'uploads'))) {
+  fs.mkdirSync(path.join(__dirname, 'uploads'), { recursive: true });
+}
+
 // Serve static files for uploaded images
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// MongoDB connection
-const uri = process.env.MONGODB_URI;
+// MongoDB connection (replace with your URI if needed for testing)
+const uri = process.env.MONGODB_URI || "mongodb://localhost:27017/yourdbname";
 
 mongoose
   .connect(uri)
@@ -44,16 +50,14 @@ const productModel = mongoose.model("products", productSchema);
 // Configure multer for file upload
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, 'uploads/'); // Save uploaded images in the "uploads" directory
+    cb(null, 'uploads/');
   },
   filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`); // Save files with a unique name
+    cb(null, `${Date.now()}-${file.originalname}`);
   },
 });
 
 const upload = multer({ storage: storage });
-
-
 
 // Route to create a new product with an image
 app.post("/products", upload.single("image"), async (req, res) => {
@@ -70,23 +74,25 @@ app.post("/products", upload.single("image"), async (req, res) => {
     const savedProduct = await newProduct.save();
     res.status(200).json(savedProduct);
   } catch (error) {
-    res.status(500).json(error);
+    console.error("Error saving product:", error);
+    res.status(500).json({ message: "Internal Server Error", error: error.message });
   }
 });
 
-
-
-// Route to get all products with image URLs
+// Route to get all products with absolute image URLs
 app.get("/products", async (req, res) => {
   try {
     const products = await productModel.find();
-    res.status(200).json(products);
+    const productsWithAbsoluteUrls = products.map(product => ({
+      ...product._doc,
+      image: product.image ? `${req.protocol}://${req.get('host')}${product.image}` : null
+    }));
+    res.status(200).json(productsWithAbsoluteUrls);
   } catch (error) {
-    res.status(500).json(error);
+    console.error("Error fetching products:", error);
+    res.status(500).json({ message: "Internal Server Error", error: error.message });
   }
 });
-
-
 
 // Route to update a product
 app.put("/products/:id", upload.single("image"), async (req, res) => {
@@ -97,13 +103,10 @@ app.put("/products/:id", upload.single("image"), async (req, res) => {
       description: req.body.description,
     };
 
-    // If a new image is provided, update the image URL
+    // If a new image is provided, update the image URL and delete the old image
     if (req.file) {
-      // Check if the product has an existing image
       const product = await productModel.findById(req.params.id);
-
       if (product && product.image) {
-        // Delete the old image if it exists
         const oldImagePath = path.join(__dirname, product.image);
         fs.unlink(oldImagePath, (err) => {
           if (err) {
@@ -111,39 +114,54 @@ app.put("/products/:id", upload.single("image"), async (req, res) => {
           }
         });
       }
-
       updatedData.image = `/uploads/${req.file.filename}`;
     }
 
     const updatedProduct = await productModel.findByIdAndUpdate(
       req.params.id,
       updatedData,
-      { new: true } // Return the updated document
+      { new: true }
     );
 
     if (!updatedProduct) {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    res.status(200).json(updatedProduct);
+    // Return the updated product with an absolute URL for the image
+    const updatedProductWithAbsoluteUrl = {
+      ...updatedProduct._doc,
+      image: updatedProduct.image ? `${req.protocol}://${req.get('host')}${updatedProduct.image}` : null
+    };
+    res.status(200).json(updatedProductWithAbsoluteUrl);
   } catch (error) {
-    res.status(500).json(error);
+    console.error("Error updating product:", error);
+    res.status(500).json({ message: "Internal Server Error", error: error.message });
   }
 });
-
 
 // Route to delete a product
 app.delete("/products/:id", async (req, res) => {
   try {
-    const deletedProduct = await productModel.findByIdAndDelete(req.params.id);
-
-    if (!deletedProduct) {
+    const product = await productModel.findById(req.params.id);
+    if (!product) {
       return res.status(404).json({ message: "Product not found" });
     }
 
+    // Delete the associated image file
+    if (product.image) {
+      const imagePath = path.join(__dirname, product.image);
+      fs.unlink(imagePath, (err) => {
+        if (err) {
+          console.error("Error deleting image:", err);
+        }
+      });
+    }
+
+    await productModel.findByIdAndDelete(req.params.id);
     res.status(200).json({ message: "Product deleted successfully" });
   } catch (error) {
-    res.status(500).json(error);
+    console.error("Error deleting product:", error);
+    res.status(500).json({ message: "Internal Server Error", error: error.message });
   }
 });
 
